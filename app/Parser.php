@@ -21,7 +21,6 @@ use function gc_disable;
 use function getmypid;
 use function json_encode;
 use function ksort;
-use function max;
 use function pack;
 use function pcntl_fork;
 use function pcntl_wait;
@@ -41,9 +40,8 @@ use const SEEK_CUR;
 final class Parser
 {
 	private const int BLOG_PREFIX_LENGTH = 25;
-	private const int WORKERS = 12;
-	private const int CHUNK_SIZE = 1_048_576;
-	private const int SMALL_FILE_THRESHOLD = 16_777_216;
+    private const int WORKERS = 10;
+    private const int CHUNK_SIZE = 524_288;
 
 	private const string FORMAT_16BIT = "\x01";
 	private const string FORMAT_32BIT = "\x02";
@@ -67,26 +65,19 @@ final class Parser
 			$dateLabelById,
 			$dateCount,
 		] = $this->buildDateLookup();
+		$sampleBuffer = $this->readSampleBuffer($inputPath, $fileSize);
 
-		if (
-			!$this->supportsFastDateRange(
-				$inputPath,
-				$fileSize,
-				$packedDateIdByDate,
-			)
-		) {
+		if (!$this->supportsFastDateRange($sampleBuffer, $packedDateIdByDate)) {
 			$this->parseGeneric($inputPath, $outputPath);
 
 			return;
 		}
 
 		[$slugIdByPath, $slugPathById, $slugCount] = $this->buildSlugLookup(
-			$inputPath,
-			$fileSize,
+			$sampleBuffer,
 		);
 
-		$workerCount =
-			$fileSize < self::SMALL_FILE_THRESHOLD ? 1 : self::WORKERS;
+		$workerCount = self::WORKERS;
 
 		$chunkBounds = [0];
 		$inputStream = fopen($inputPath, "rb");
@@ -123,7 +114,10 @@ final class Parser
 			$childProcessId = pcntl_fork();
 
 			if ($childProcessId === 0) {
-				$chunkCounts = $this->crunch(
+				[
+					$chunkCounts,
+					$maximumChunkCount,
+				] = $this->crunch(
 					$inputPath,
 					$chunkBounds[$workerChunkIndex],
 					$chunkBounds[$workerChunkIndex + 1],
@@ -133,7 +127,7 @@ final class Parser
 					$dateCount,
 				);
 
-				$uses16BitPacking = max($chunkCounts) <= 0xffff;
+				$uses16BitPacking = $maximumChunkCount <= 0xffff;
 				$packedChunkCounts = $uses16BitPacking
 					? pack("v*", ...$chunkCounts)
 					: pack("V*", ...$chunkCounts);
@@ -152,7 +146,7 @@ final class Parser
 			$childProcessFileByPid[$childProcessId] = $temporaryFilePath;
 		}
 
-		$totalCounts = $this->crunch(
+		[$totalCounts] = $this->crunch(
 			$inputPath,
 			$chunkBounds[$chunkCount - 1],
 			$chunkBounds[$chunkCount],
@@ -387,6 +381,7 @@ final class Parser
 		fclose($inputStream);
 
 		$flatCounts = array_fill(0, $slugCount * $dateCount, 0);
+		$maximumVisitCount = 0;
 
 		for ($slugId = 0; $slugId < $slugCount; $slugId++) {
 			if ($packedDateIdsBySlug[$slugId] === "") {
@@ -399,85 +394,37 @@ final class Parser
 				array_count_values(unpack("v*", $packedDateIdsBySlug[$slugId]))
 				as $dateId => $visitCount
 			) {
-				$flatCounts[$slugOffset + $dateId] += $visitCount;
-			}
-		}
+				$flatCounts[$slugOffset + $dateId] = $visitCount;
 
-		return $flatCounts;
-	}
-
-	private function buildDateLookup(): array
-	{
-		$dateIdByDate = [];
-		$dateLabelById = [];
-		$dateCount = 0;
-
-		for ($yearTwoDigits = 20; $yearTwoDigits <= 26; $yearTwoDigits++) {
-			for ($monthNumber = 1; $monthNumber <= 12; $monthNumber++) {
-				$daysInMonth = match ($monthNumber) {
-					2 => $yearTwoDigits % 4 === 0 ? 29 : 28,
-					4, 6, 9, 11 => 30,
-					default => 31,
-				};
-
-				$monthString = ($monthNumber < 10 ? "0" : "") . $monthNumber;
-				$yearMonthPrefix = $yearTwoDigits . "-" . $monthString . "-";
-
-				for ($dayNumber = 1; $dayNumber <= $daysInMonth; $dayNumber++) {
-					$dateKey =
-						$yearMonthPrefix .
-						(($dayNumber < 10 ? "0" : "") . $dayNumber);
-					$dateIdByDate[$dateKey] = $dateCount;
-					$dateLabelById[$dateCount] = "20" . $dateKey;
-					$dateCount++;
+				if ($visitCount > $maximumVisitCount) {
+					$maximumVisitCount = $visitCount;
 				}
 			}
 		}
 
-		$packedDateIdByDate = [];
-		foreach ($dateIdByDate as $dateKey => $dateId) {
-			$packedDateIdByDate[$dateKey] =
-				chr($dateId & 0xff) . chr($dateId >> 8);
-		}
-
-		return [$packedDateIdByDate, $dateLabelById, $dateCount];
+		return [$flatCounts, $maximumVisitCount];
 	}
 
 	private function supportsFastDateRange(
-		string $inputPath,
-		int $fileSize,
+		string $sampleBuffer,
 		array $packedDateIdByDate,
 	): bool {
-		$inputStream = fopen($inputPath, "rb");
-		stream_set_read_buffer($inputStream, 0);
-		$sampleBuffer = fread(
-			$inputStream,
-			$fileSize > 2_097_152 ? 2_097_152 : $fileSize,
-		);
-		fclose($inputStream);
-
-		$sampleLastNewLineOffset = strrpos($sampleBuffer, "\n");
-		if ($sampleLastNewLineOffset === false) {
+		if ($sampleBuffer === "") {
 			return true;
 		}
 
-		$lineStartOffset = 0;
+		$newLineOffset = strpos($sampleBuffer, "\n");
+		$firstLine =
+			$newLineOffset === false
+				? $sampleBuffer
+				: substr($sampleBuffer, 0, $newLineOffset + 1);
 
-		while ($lineStartOffset < $sampleLastNewLineOffset) {
-			$newLineOffset = strpos($sampleBuffer, "\n", $lineStartOffset + 53);
-			if ($newLineOffset === false) {
-				break;
-			}
-
-			$dateKey = substr($sampleBuffer, $newLineOffset - 23, 8);
-			if (!isset($packedDateIdByDate[$dateKey])) {
-				return false;
-			}
-
-			$lineStartOffset = $newLineOffset + 1;
+		$newLineOffset = strrpos($firstLine, "\n");
+		if ($newLineOffset === false) {
+			$newLineOffset = strlen($firstLine);
 		}
 
-		return true;
+		return isset($packedDateIdByDate[substr($firstLine, $newLineOffset - 23, 8)]);
 	}
 
 	private function parseGeneric(string $inputPath, string $outputPath): void
@@ -520,16 +467,45 @@ final class Parser
 		fclose($outputStream);
 	}
 
-	private function buildSlugLookup(string $inputPath, int $fileSize): array
+	private function buildDateLookup(): array
 	{
-		$inputStream = fopen($inputPath, "rb");
-		stream_set_read_buffer($inputStream, 0);
-		$sampleBuffer = fread(
-			$inputStream,
-			$fileSize > 2_097_152 ? 2_097_152 : $fileSize,
-		);
-		fclose($inputStream);
+		$dateIdByDate = [];
+		$dateLabelById = [];
+		$dateCount = 0;
 
+		for ($yearTwoDigits = 20; $yearTwoDigits <= 26; $yearTwoDigits++) {
+			for ($monthNumber = 1; $monthNumber <= 12; $monthNumber++) {
+				$daysInMonth = match ($monthNumber) {
+					2 => $yearTwoDigits % 4 === 0 ? 29 : 28,
+					4, 6, 9, 11 => 30,
+					default => 31,
+				};
+
+				$monthString = ($monthNumber < 10 ? "0" : "") . $monthNumber;
+				$yearMonthPrefix = $yearTwoDigits . "-" . $monthString . "-";
+
+				for ($dayNumber = 1; $dayNumber <= $daysInMonth; $dayNumber++) {
+					$dateKey =
+						$yearMonthPrefix .
+						(($dayNumber < 10 ? "0" : "") . $dayNumber);
+					$dateIdByDate[$dateKey] = $dateCount;
+					$dateLabelById[$dateCount] = "20" . $dateKey;
+					$dateCount++;
+				}
+			}
+		}
+
+		$packedDateIdByDate = [];
+		foreach ($dateIdByDate as $dateKey => $dateId) {
+			$packedDateIdByDate[$dateKey] =
+				chr($dateId & 0xff) . chr($dateId >> 8);
+		}
+
+		return [$packedDateIdByDate, $dateLabelById, $dateCount];
+	}
+
+	private function buildSlugLookup(string $sampleBuffer): array
+	{
 		$slugIdByPath = [];
 		$slugPathById = [];
 		$slugCount = 0;
@@ -575,5 +551,18 @@ final class Parser
 		}
 
 		return [$slugIdByPath, $slugPathById, $slugCount];
+	}
+
+	private function readSampleBuffer(string $inputPath, int $fileSize): string
+	{
+		$inputStream = fopen($inputPath, "rb");
+		stream_set_read_buffer($inputStream, 0);
+		$sampleBuffer = fread(
+			$inputStream,
+			$fileSize > 2_097_152 ? 2_097_152 : $fileSize,
+		);
+		fclose($inputStream);
+
+		return $sampleBuffer;
 	}
 }
