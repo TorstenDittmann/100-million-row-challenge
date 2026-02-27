@@ -214,7 +214,6 @@ final class Parser
 
 		$slugLookup = $slugIdByPath;
 		$dateLookup = $packedDateIdByDate;
-		$buckets = &$packedDateIdsBySlug;
 
 		$inputStream = fopen($inputPath, "rb");
 		stream_set_read_buffer($inputStream, 0);
@@ -263,7 +262,7 @@ final class Parser
 					$newLineOffset - $lineStartOffset - 51,
 				);
 				$dateKey = substr($chunkBuffer, $newLineOffset - 23, 8);
-				$buckets[$slugLookup[$slugPath]] .= $dateLookup[$dateKey];
+				$packedDateIdsBySlug[$slugLookup[$slugPath]] .= $dateLookup[$dateKey];
 				$lineStartOffset = $newLineOffset + 1;
 
 				$newLineOffset = strpos(
@@ -277,7 +276,7 @@ final class Parser
 					$newLineOffset - $lineStartOffset - 51,
 				);
 				$dateKey = substr($chunkBuffer, $newLineOffset - 23, 8);
-				$buckets[$slugLookup[$slugPath]] .= $dateLookup[$dateKey];
+				$packedDateIdsBySlug[$slugLookup[$slugPath]] .= $dateLookup[$dateKey];
 				$lineStartOffset = $newLineOffset + 1;
 
 				$newLineOffset = strpos(
@@ -291,7 +290,7 @@ final class Parser
 					$newLineOffset - $lineStartOffset - 51,
 				);
 				$dateKey = substr($chunkBuffer, $newLineOffset - 23, 8);
-				$buckets[$slugLookup[$slugPath]] .= $dateLookup[$dateKey];
+				$packedDateIdsBySlug[$slugLookup[$slugPath]] .= $dateLookup[$dateKey];
 				$lineStartOffset = $newLineOffset + 1;
 
 				$newLineOffset = strpos(
@@ -305,7 +304,7 @@ final class Parser
 					$newLineOffset - $lineStartOffset - 51,
 				);
 				$dateKey = substr($chunkBuffer, $newLineOffset - 23, 8);
-				$buckets[$slugLookup[$slugPath]] .= $dateLookup[$dateKey];
+				$packedDateIdsBySlug[$slugLookup[$slugPath]] .= $dateLookup[$dateKey];
 				$lineStartOffset = $newLineOffset + 1;
 
 				$newLineOffset = strpos(
@@ -319,7 +318,7 @@ final class Parser
 					$newLineOffset - $lineStartOffset - 51,
 				);
 				$dateKey = substr($chunkBuffer, $newLineOffset - 23, 8);
-				$buckets[$slugLookup[$slugPath]] .= $dateLookup[$dateKey];
+				$packedDateIdsBySlug[$slugLookup[$slugPath]] .= $dateLookup[$dateKey];
 				$lineStartOffset = $newLineOffset + 1;
 
 				$newLineOffset = strpos(
@@ -333,7 +332,7 @@ final class Parser
 					$newLineOffset - $lineStartOffset - 51,
 				);
 				$dateKey = substr($chunkBuffer, $newLineOffset - 23, 8);
-				$buckets[$slugLookup[$slugPath]] .= $dateLookup[$dateKey];
+				$packedDateIdsBySlug[$slugLookup[$slugPath]] .= $dateLookup[$dateKey];
 				$lineStartOffset = $newLineOffset + 1;
 			}
 
@@ -353,7 +352,7 @@ final class Parser
 					$newLineOffset - $lineStartOffset - 51,
 				);
 				$dateKey = substr($chunkBuffer, $newLineOffset - 23, 8);
-				$buckets[$slugLookup[$slugPath]] .= $dateLookup[$dateKey];
+				$packedDateIdsBySlug[$slugLookup[$slugPath]] .= $dateLookup[$dateKey];
 				$lineStartOffset = $newLineOffset + 1;
 			}
 		}
@@ -363,14 +362,14 @@ final class Parser
 		$flatCounts = array_fill(0, $slugCount * $dateCount, 0);
 
 		for ($slugId = 0; $slugId < $slugCount; $slugId++) {
-			if ($buckets[$slugId] === "") {
+			if ($packedDateIdsBySlug[$slugId] === "") {
 				continue;
 			}
 
 			$slugOffset = $slugId * $dateCount;
 
 			foreach (
-				array_count_values(unpack("v*", $buckets[$slugId]))
+				array_count_values(unpack("v*", $packedDateIdsBySlug[$slugId]))
 				as $dateId => $visitCount
 			) {
 				$flatCounts[$slugOffset + $dateId] = $visitCount;
